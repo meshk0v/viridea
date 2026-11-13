@@ -1,0 +1,234 @@
+openapi: 3.1.0
+info:
+  title: VIRIDEA Integration API
+  version: 1.0.0
+  description: |
+    Проект API интернет-магазина VIRIDEA для независимой интеграции (RetailCRM подключается после приёмки).
+    Пути — рекомендуемый проект; точный реестр endpoint, полей, статусов и событий согласуется в приложении к договору
+    с командой RetailCRM. Изменения контракта — только с версионированием (/api/v2) и периодом обратной совместимости.
+
+    Общие правила:
+    - Авторизация: `Authorization: Bearer <key>`; у ключа ограниченный набор прав (scopes), ротация без простоя.
+    - Только TLS. Лимит запросов: 120/мин на ключ (429 + Retry-After).
+    - Все POST требуют `Idempotency-Key`; повтор с тем же ключом возвращает сохранённый ответ.
+    - Изменение заказа требует `expected_version`; при несовпадении — 409 VERSION_CONFLICT.
+    - Остатки из CRM напрямую не изменяются — только через складские документы сайта.
+    - Время — ISO 8601 UTC; валюта — RUB.
+servers:
+  - url: https://viridea.ru/api/v1
+    description: Рабочий контур
+security:
+  - bearer: []
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+  parameters:
+    Limit: { name: limit, in: query, schema: { type: integer, default: 20, maximum: 100 } }
+    Offset: { name: offset, in: query, schema: { type: integer, default: 0 } }
+    UpdatedAfter: { name: updated_after, in: query, schema: { type: string, format: date-time } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, maxLength: 128 } }
+  responses:
+    Error:
+      description: Ошибка
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            conflict: { value: { error: { code: VERSION_CONFLICT, message: 'Версия заказа 3, ожидалась 2', retryable: false, correlation_id: cor_8f2k1m } } }
+            unauthorized: { value: { error: { code: UNAUTHORIZED, message: 'Неверный или отозванный ключ', retryable: false, correlation_id: cor_x1 } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, retryable, correlation_id]
+          properties:
+            code: { type: string, enum: [UNAUTHORIZED, FORBIDDEN_SCOPE, FORBIDDEN, NOT_FOUND, VALIDATION, VERSION_CONFLICT, STATE, IDEMPOTENCY_KEY_REQUIRED, RATE_LIMITED, INTERNAL] }
+            message: { type: string }
+            retryable: { type: boolean }
+            correlation_id: { type: string }
+    Page:
+      type: object
+      properties:
+        meta: { type: object, properties: { total: { type: integer }, limit: { type: integer }, offset: { type: integer } } }
+    Product:
+      type: object
+      properties:
+        sku: { type: string, example: MC-0002 }
+        cultivar_id: { type: string, example: CV-0001 }
+        name: { type: string }
+        category: { type: string, enum: [microclone, adapted, seedling, care] }
+        pack_size: { type: integer, description: Количество растений в упаковке (отдельно от числа упаковок) }
+        sale_unit: { type: string }
+        price: { type: number }
+        currency: { type: string, example: RUB }
+        availability: { type: string, enum: [in_stock, incoming, preorder, out] }
+        available_qty: { type: integer, description: Физически доступно к продаже (без ожидаемого от лабораторий) }
+        active: { type: boolean }
+        updated_at: { type: string, format: date-time }
+    StockRow:
+      type: object
+      properties:
+        warehouse_id: { type: string }
+        sku: { type: string }
+        batch_id: { type: string }
+        physical: { type: integer }
+        quarantine: { type: integer }
+        reserved: { type: integer }
+        available: { type: integer }
+        revision: { type: integer }
+    OrderLine:
+      type: object
+      properties:
+        id: { type: string }
+        sku: { type: string }
+        title: { type: string, description: Снимок наименования на момент заказа }
+        pack_size: { type: integer }
+        qty: { type: integer }
+        unit_price: { type: number, description: Историческая цена, не меняется при изменении каталога }
+        mode: { type: string, enum: [stock, preorder] }
+        status: { type: string, enum: [reserved, queued, confirmed, partial, shortage, expired, shipped, replaced, cancelled] }
+    Order:
+      type: object
+      properties:
+        id: { type: string, example: ORD-00003 }
+        external_ids: { type: object, additionalProperties: { type: string } }
+        channel: { type: string, enum: [site, vk, telegram, offline] }
+        customer_id: { type: string }
+        status: { type: string, enum: [awaiting_payment, partially_paid, paid, awaiting_supply, needs_decision, partially_shipped, shipped, delivered, cancelled] }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        currency: { type: string }
+        lines: { type: array, items: { $ref: '#/components/schemas/OrderLine' } }
+        totals: { type: object, properties: { subtotal: { type: number }, delivery: { type: number }, total: { type: number }, paid: { type: number }, balance: { type: number } } }
+        payments: { type: array, items: { $ref: '#/components/schemas/Payment' } }
+        shipments: { type: array, items: { $ref: '#/components/schemas/Shipment' } }
+    Payment:
+      type: object
+      properties:
+        id: { type: string }
+        order_id: { type: string }
+        kind: { type: string, enum: [payment, refund] }
+        provider_ref: { type: string, description: Уникальный ID операции провайдера; повтор не удваивает оплату }
+        amount: { type: number }
+        currency: { type: string }
+        occurred_at: { type: string, format: date-time }
+    Shipment:
+      type: object
+      properties:
+        id: { type: string }
+        order_id: { type: string }
+        carrier: { type: string, enum: [cdek, 5post, ozon, yandex, russianpost] }
+        tracking: { type: string }
+        status: { type: string, enum: [created, handed_over, arrived, received] }
+        line_ids: { type: array, items: { type: string } }
+        handover_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+    Event:
+      type: object
+      required: [event_id, type, occurred_at, object_id, version]
+      properties:
+        event_id: { type: string }
+        type: { type: string, enum: [order.created, order.updated, payment.confirmed, payment.refunded, preorder.shortage, replacement.confirmed, reservation.expiring, shipment.handed_over, shipment.received, claim.opened] }
+        occurred_at: { type: string, format: date-time }
+        object_id: { type: string }
+        version: { type: integer }
+        data: { type: object }
+paths:
+  /health:
+    get:
+      summary: Состояние интеграционного API (без секретов)
+      security: []
+      responses:
+        '200': { description: OK, content: { application/json: { example: { status: ok, version: v1, pending_events: 3, google_sync: ok } } } }
+  /products:
+    get:
+      summary: Товары и варианты
+      parameters: [{ $ref: '#/components/parameters/UpdatedAfter' }, { name: sku, in: query, schema: { type: string } }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Offset' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Page' }, { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Product' } } } }] } } } }
+        '401': { $ref: '#/components/responses/Error' }
+  /stock:
+    get:
+      summary: Доступные остатки по складам, SKU и партиям
+      parameters: [{ name: sku, in: query, schema: { type: string } }, { name: warehouse_id, in: query, schema: { type: string } }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Offset' }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Page' }, { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/StockRow' } } } }] } } } }
+  /orders:
+    get:
+      summary: Поиск заказов по обновлению и внешнему ID
+      parameters: [{ $ref: '#/components/parameters/UpdatedAfter' }, { name: external_id, in: query, schema: { type: string } }, { $ref: '#/components/parameters/Limit' }, { $ref: '#/components/parameters/Offset' }]
+      responses:
+        '200': { description: OK }
+  /orders/{id}:
+    get:
+      summary: Заказ, позиции, суммы, статусы, платежи, посылки
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /orders/{id}/actions:
+    post:
+      summary: Разрешённое действие CRM над заказом
+      description: Проверяются права ключа, версия заказа, резервы и платежи. Изменение остатков из CRM запрещено.
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, expected_version]
+              properties:
+                action: { type: string, enum: [set_external_id, cancel_line] }
+                expected_version: { type: integer }
+                actor: { type: string }
+                system: { type: string }
+                value: { type: string }
+                line_id: { type: string }
+                reason: { type: string }
+            examples:
+              link: { value: { action: set_external_id, system: retailcrm, value: CRM-1001, expected_version: 2, actor: crm-sync } }
+      responses:
+        '200': { description: Обновлённый заказ, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /customers/{id}:
+    get:
+      summary: Профиль клиента без избыточных ПД
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses: { '200': { description: OK } }
+  /customers/link:
+    post:
+      summary: Связка CRM ID и ID сайта с проверкой дублей
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [site_id, crm_id], properties: { site_id: { type: string }, crm_id: { type: string } } } } } }
+      responses: { '200': { description: OK }, '409': { $ref: '#/components/responses/Error' } }
+  /payments:
+    get:
+      summary: Подтверждённые оплаты и возвраты
+      responses: { '200': { description: OK } }
+  /shipments:
+    get:
+      summary: Посылки и даты фактического вручения
+      responses: { '200': { description: OK } }
+  /approvals:
+    post:
+      summary: Решение по замене/возврату/претензии с правом и причиной
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [type, object_id, decision], properties: { type: { type: string, enum: [claim] }, object_id: { type: string }, decision: { type: string, enum: [reject, compensation, refund, replacement] }, amount: { type: number }, reason: { type: string }, actor: { type: string } } } } } }
+      responses: { '200': { description: OK } }
+  /events:
+    get:
+      summary: Журнал событий (pull-режим, дублирует webhooks)
+      parameters: [{ name: after, in: query, schema: { type: string }, description: event_id, после которого читать }]
+      responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Event' } } } } } } } }
+  /webhooks/subscriptions:
+    post:
+      summary: Подписка CRM на события
+      description: Каждый webhook подписывается HMAC-SHA256 (заголовок X-Viridea-Signature), доставка с повторами и dead-letter очередью.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [url], properties: { url: { type: string, format: uri }, events: { type: array, items: { type: string } } } } } } }
+      responses: { '201': { description: Создано; секрет возвращается один раз } }

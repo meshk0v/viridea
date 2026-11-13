@@ -1,0 +1,23 @@
+{
+  "name": "viridea",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5274",
+    "build": "vite build",
+    "preview": "vite preview --port 4374",
+    "test": "node scripts/acceptance.test.mjs"
+  },
+  "dependencies": {
+    "jszip": "3.10.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.26.2",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.1",
+    "vite": "5.4.8"
+  }
+}
